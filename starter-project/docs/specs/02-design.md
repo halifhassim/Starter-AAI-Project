@@ -149,3 +149,209 @@ build can be tested with more than one person per role.
 | `npm run db:studio` | Open a browser view of the database |
 | `npm run lint` | Check the code for common mistakes |
 | `npm run build` | Check the whole app compiles |
+
+---
+
+# Leave Request – Design
+
+> **How it is built.** This document turns the Leave Request requirements
+> ([01-requirements.md](01-requirements.md), second half) into a plan a
+> builder (person or AI) can follow without asking the business again.
+> That document is the source of truth for *behaviour*; if the two disagree,
+> fix the requirements first, then this file.
+>
+> - **Part A – Data design** (sections 1–4): approved 2026-11-10.
+> - **Part B – App design** (sections 5–8): the AI drafts this; you check it.
+
+---
+
+# Part A – Data design (you review)
+
+## 1. Tables
+
+One new table. Every row gets a number (`id`) automatically. People are not
+copied into this table — a row only stores their `id`, and the app looks up
+the name when it shows the request.
+
+### `LeaveRequest` – one row per leave request
+
+| Field | Type | Required? | What it holds |
+|-------|------|-----------|---------------|
+| `id` | number | auto | Unique number for the request |
+| `employeeId` | number | yes | The `User` who made the request |
+| `supervisorId` | number | yes | The `User` chosen to sign it — a Supervisor from the employee's own division |
+| `leaveType` | text | yes | `Annual`, `Sick`, `Emergency` or `Unpaid` |
+| `startDate` | date | yes | First day of leave |
+| `endDate` | date | yes | Last day of leave |
+| `reason` | text | yes | Why the employee needs the leave, typed on the form |
+| `status` | text | yes | One of the six labels in §2; starts at **Waiting for supervisor** |
+| `remarks` | text | no | The reason typed by whoever rejected; stays empty until then |
+| `decidedByHrId` | number | no | The HR `User` who pressed Approve or Reject; empty until HR decides |
+| `createdAt` | date + time | auto | When the request was submitted |
+| `updatedAt` | date + time | auto | When anything on the request last changed |
+
+Three notes:
+
+- **Days are not stored.** The day count is worked out for display only:
+  calendar days, counting both the start and the end date (requirement A3).
+- **Why is status plain text?** Same reason as `User.role` in §1 of the Login
+  design: SQLite has no fixed list of choices ("enums"), so the allowed
+  labels live in `src/lib/constants.ts` and the app checks them.
+- **Nothing is edited or deleted after submission.** Only the buttons in the
+  app change a row, and only ever `status`, `remarks` and `decidedByHrId`
+  (requirements A11–A12).
+
+## 2. Statuses
+
+Exactly the six labels from requirement A4. Nobody picks a status by hand —
+only the actions in the table below set one.
+
+| Status | Where the request is | Set when |
+|--------|----------------------|----------|
+| **Waiting for supervisor** | sitting with the chosen supervisor | the employee submits the form |
+| **Signed – waiting to send** | supervisor said yes; the employee still has to send it to HR | the supervisor signs |
+| **Waiting for HR** | in HR's shared list, waiting for a decision | the employee clicks **Send to HR** |
+| **Approved** | HR said yes; `decidedByHrId` is filled | an HR officer approves |
+| **Rejected by supervisor** | supervisor said no; `remarks` holds the reason | the supervisor rejects |
+| **Rejected by HR** | HR said no; `remarks` holds the reason; `decidedByHrId` is filled | an HR officer rejects |
+
+> **Stretch only:** the cancel button (story U14) needs a seventh label,
+> **Cancelled**, for a request still *Waiting for supervisor*. Requirement A4
+> says six, so if the stretch is built, update A4 in the requirements first.
+
+## 3. Business rules
+
+1. **The form needs everything.** Leave type, start date, end date, reason
+   and a chosen supervisor are all required; an empty form is refused.
+2. **Dates.** Start must be on or before end, and the start cannot be in the
+   past (today is allowed). Dates are compared in the company time zone
+   (`Asia/Brunei`), same as the rest of the app (A9).
+3. **The supervisor must be from your division.** The dropdown only lists
+   users who are Supervisors in the employee's own division; the choice is
+   made at submission and never changes afterwards (A5).
+4. **Only the chosen supervisor decides at stage one.** Nobody else can sign
+   or reject, and only while the status is *Waiting for supervisor*.
+5. **A rejection always has a reason.** Whether it comes from the supervisor
+   or from HR, an empty reason box is refused; the reason is stored in
+   `remarks` (A7).
+6. **Only the employee sends to HR**, and only when the request is
+   *Signed – waiting to send*. Nobody else can press that button.
+7. **HR decides from the shared list.** Either HR officer can approve or
+   reject any request *Waiting for HR*. The first decision counts; if the
+   other officer had the page open, their action is refused and they see the
+   decided status (A10). Whichever officer decides is stored in
+   `decidedByHrId` (A8).
+8. **A finished request is closed.** Once a request is Approved or Rejected
+   (by either side), no button on any page changes it again — the server
+   refuses such an action even if someone sends one (AC-21).
+9. **Cancel (stretch only).** Only the employee who made the request can
+   cancel it, and only while it is still *Waiting for supervisor* (U14).
+10. **Allowed values live in one place.** `leaveType` and `status` values are
+    kept with the other lists in `src/lib/constants.ts`, like roles,
+    divisions and designations already are.
+11. **The seed does not create requests.** `npm run db:seed` still creates
+    only the seven users; every request is made through the app itself (A12).
+
+## 4. Who sees what
+
+| Who | Sees | Can do |
+|-----|------|--------|
+| **Employee** | only their own requests, in **Current** (not yet decided) and **Past** (decided) groups, with status and remarks | submit a request; send their own signed request to HR; cancel while waiting (stretch) |
+| **Supervisor** | requests where they are the chosen supervisor, at any stage — including decided ones they handled — except cancelled ones, which disappear from their list | sign or reject while *Waiting for supervisor* |
+| **HR** | one shared list: every request *Waiting for HR*, plus the decided ones in **Past**. Requests still with the supervisor are not shown | approve or reject while *Waiting for HR* |
+| **Admin** | every request from every division, in any status | nothing — the list has no buttons at all |
+
+Two visibility rules from the requirements:
+
+- The **reason for a rejection** (`remarks`) is shown to the requesting
+  employee, their supervisor, every HR user and the Admin (A7).
+- The **HR officer who decided** (`decidedByHrId`, shown as their name)
+  appears on every list that shows the record (A8).
+
+---
+
+# Part B – App design (AI drafts, you check)
+
+## 5. Screens (one per role action)
+
+The four hint pages become real pages. Each action has its own screen, and a
+screen only ever shows the buttons this user may press *right now* (Part A
+§3–§4). The top bar and the pieces from `src/components/ui/` (Button, Card,
+Field, PageHeader, EmptyState, DetailSection) are reused — no new look.
+
+| Route | Who | What it shows | Actions on it |
+|-------|-----|---------------|---------------|
+| `/employee` | Employee | Their own requests in **Current** and **Past** groups: type, dates, days, status, remarks. A **Submit leave request** button at the top. | **Send to HR** on a *Signed – waiting to send* row; **Cancel request** on a *Waiting for supervisor* row (stretch). |
+| `/employee/new` | Employee | The submit form: leave type, start date, end date, reason, and a supervisor dropdown with only supervisors from the employee's division. | **Submit**. |
+| `/supervisor` | Supervisor | The requests chosen for them, Current and Past. | Open a request. |
+| `/supervisor/[id]` | Supervisor | One request in full: employee, type, dates, days, reason, status, remarks. | **Sign**, or **Reject** with a reason box, while *Waiting for supervisor*. Nothing once decided. |
+| `/hr` | HR | The one list both HR officers share: **Waiting for HR** on top, **Past** below. | Open a request. |
+| `/hr/[id]` | HR | One request in full, plus the name of the HR officer who decided, once decided. | **Approve**, or **Reject** with a reason box, while *Waiting for HR*. Nothing once decided. |
+| `/admin` | Admin | Every request from every division, with its status. A status filter (stretch). | None — there are no buttons here at all. |
+| `/admin/[id]` | Admin | One request, read-only. | None. |
+
+Details:
+
+- An employee has no detail screen of their own: their list row already shows
+  everything they may see.
+- Opening a detail page of another role sends you back to your home page,
+  just like the login pages do (`requireRole` covers these routes too).
+- Errors show in red above the form or the reason box, with the exact words
+  from the checklist: "End date cannot be before start date." and "A reason
+  is required."
+
+## 6. What each button does
+
+One button = one server action (same pattern as `loginAction`). Before
+touching the database, every action checks on the server: **who is pressing**
+(their role, and that they are the right person for this row) and **whether
+the row still has the status this button expects**. Hiding a button is never
+enough — the server does the same check again.
+
+| Button | Pressed by | Allowed only when | What it does |
+|--------|-----------|-------------------|--------------|
+| **Submit** | Employee | form is complete and valid; the chosen supervisor is a Supervisor in the employee's own division | creates the row at **Waiting for supervisor** |
+| **Sign** | the chosen supervisor | status is *Waiting for supervisor* | → **Signed – waiting to send** |
+| **Reject** (supervisor) | the chosen supervisor | status is *Waiting for supervisor*; the reason box is not empty | → **Rejected by supervisor**; stores the reason |
+| **Send to HR** | the requesting employee | status is *Signed – waiting to send* | → **Waiting for HR** |
+| **Approve** | any HR officer | status is *Waiting for HR* | → **Approved**; stores who decided |
+| **Reject** (HR) | any HR officer | status is *Waiting for HR*; the reason box is not empty | → **Rejected by HR**; stores the reason and who decided |
+| **Cancel request** (stretch) | the requesting employee | status is *Waiting for supervisor* | → **Cancelled**; the row leaves the supervisor's list |
+
+**Two HR officers, one decision (A10):** an action updates the row *only if
+it still has the status the button expects*. If the other officer decided
+first, this update changes nothing: the action is refused and the page shows
+the decided status.
+
+## 7. Where the new code lives
+
+Everything new sits next to the login code; nothing moves.
+
+| Folder / file | What's new in it |
+|---------------|------------------|
+| `prisma/schema.prisma`, `prisma/migrations/` | the `LeaveRequest` table from Part A §1 |
+| `src/lib/constants.ts` | `LEAVE_TYPES` and `STATUSES` lists, kept next to roles, divisions and designations |
+| `src/lib/leave.ts` | plain helpers: day count (A3), date checks (A9), "may this user act on this row now?" (Part A §3) |
+| `src/app/actions.ts` | the server actions for every button in §6, next to `loginAction` |
+| `src/app/employee/page.tsx` | the hint page becomes the employee's list |
+| `src/app/employee/new/page.tsx` | the submit form page |
+| `src/app/supervisor/page.tsx` + `src/app/supervisor/[id]/page.tsx` | the supervisor's list and detail |
+| `src/app/hr/page.tsx` + `src/app/hr/[id]/page.tsx` | HR's shared list and detail |
+| `src/app/admin/page.tsx` + `src/app/admin/[id]/page.tsx` | the Admin's read-only list and detail |
+| `src/components/LeaveRequestForm.tsx` | the submit form (like `LoginForm.tsx`) |
+| `src/components/RequestTable.tsx` | shared list rows; each role page decides which buttons (if any) appear |
+| `src/components/DecisionButtons.tsx` | Sign/Reject and Approve/Reject with the reason box, used on both detail screens |
+
+## 8. Staying safe (in plain words)
+
+On top of the login rules in §7:
+
+- Every leave page and every leave action starts by asking who is logged in
+  and whether their role may be here (`requireRole`), like the login pages.
+- Each action checks the current user is **the** employee or **the** chosen
+  supervisor of that record — the right role is not enough.
+- The status check happens in the database update itself, so a page left
+  open from yesterday can never act twice.
+- The reason box is checked on the server too, so an empty reason can never
+  reach the database even if someone sends one by hand.
+- Admin has no server action at all — there is nothing an Admin can press.
